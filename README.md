@@ -4,7 +4,7 @@
 
 DistrictPulse AI is a reproducible SUMO/TraCI simulation project. It compares fixed-time, density-responsive, tabular SMDP Q-learning, pressure-informed control, and (after a trained checkpoint exists) forecast-aware pressure control. A generated demo includes a reproducible ambulance route so ordinary traffic performance and emergency priority can be evaluated separately.
 
-> Research honesty: this repository provides an experimental simulation pipeline, not proof that any controller is universally better. The pressure controller respects the existing SUMO phase sequence and uses pressure to decide when to extend or shorten green time; it does not jump directly to arbitrary phases. The ST-GNN must beat simple forecasting baselines on held-out data before its predictions should be trusted.
+
 
 ## Quickstart: run the upgraded demo on Windows
 
