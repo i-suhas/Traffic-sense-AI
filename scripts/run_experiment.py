@@ -16,17 +16,26 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from districtpulse.controllers import FixedController, DensityController, SMDPController
+from districtpulse.controllers import (
+    FixedController, DensityController, SMDPController,
+    PressureController, ForecastPressureController,
+)
 from districtpulse.metrics import summarize_run
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run one fixed, density-responsive, or SMDP SUMO experiment."
+        description="Run a reproducible DistrictPulse SUMO traffic-control experiment."
     )
     parser.add_argument("--scenario", default="data/demo",
                         help="Scenario folder, network XML path, or network prefix (default: data/demo).")
-    parser.add_argument("--controller", choices=("fixed", "density", "smdp"), default="smdp")
+    parser.add_argument("--controller",
+                        choices=("fixed", "density", "smdp", "max-pressure", "forecast-pressure"),
+                        default="smdp")
+    parser.add_argument("--emergency-priority", action="store_true",
+                        help="Enable route-aware ambulance priority on top of the selected controller.")
+    parser.add_argument("--forecast-model", default=None,
+                        help="Validated ST-GNN checkpoint; required for forecast-pressure.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--end", type=int, default=None,
                         help="Optional maximum simulation time in seconds.")
@@ -86,6 +95,8 @@ def main():
         raise SystemExit("--seed must be non-negative.")
     if args.end is not None and args.end <= 0:
         raise SystemExit("--end must be a positive number of seconds.")
+    if args.controller == "forecast-pressure" and not args.forecast_model:
+        raise SystemExit("--controller forecast-pressure requires --forecast-model CHECKPOINT")
 
     net, routes = resolve_scenario(args.scenario)
     results_root = Path(args.results_dir)
@@ -157,13 +168,20 @@ def main():
             "fixed": FixedController,
             "density": DensityController,
             "smdp": SMDPController,
+            "max-pressure": PressureController,
+            "forecast-pressure": ForecastPressureController,
         }[args.controller]
+        common = {"seed": args.seed, "emergency_priority": args.emergency_priority}
         if args.controller == "smdp":
             controller = controller_class(
-                conn, tls_ids, seed=args.seed, explore=not args.no_explore
+                conn, tls_ids, **common, explore=not args.no_explore
+            )
+        elif args.controller == "forecast-pressure":
+            controller = controller_class(
+                conn, tls_ids, **common, forecast_model=args.forecast_model
             )
         else:
-            controller = controller_class(conn, tls_ids, seed=args.seed)
+            controller = controller_class(conn, tls_ids, **common)
 
         while conn.simulation.getMinExpectedNumber() > 0:
             conn.simulationStep()
@@ -188,6 +206,11 @@ def main():
     ]
     write_csv(run_dir / "states.csv", controller.rows, state_fields)
     write_csv(run_dir / "smdp_transitions.csv", controller.transitions)
+    write_csv(run_dir / "emergency_events.csv", controller.emergency.events)
+    if hasattr(controller, "pressure_rows"):
+        write_csv(run_dir / "pressure_scores.csv", controller.pressure_rows)
+    if hasattr(controller, "forecast_rows"):
+        write_csv(run_dir / "forecast_predictions.csv", controller.forecast_rows)
 
     manifest = {
         "project": "DistrictPulse AI",
@@ -201,8 +224,14 @@ def main():
         "completion_status": "natural_end" if natural_completion else "stopped_at_time_limit_or_early_exit",
         "sumo_command": command,
         "exploration_enabled": (not args.no_explore) if args.controller == "smdp" else None,
+        "emergency_priority_enabled": args.emergency_priority,
+        "forecast_model": args.forecast_model if args.controller == "forecast-pressure" else None,
         "demand_note": "RandomTrips-generated demand is synthetic unless calibrated against observations.",
-        "model_note": "ST-GNN is not integrated into the live controller in this MVP.",
+        "model_note": (
+            "Forecast-pressure uses the supplied ST-GNN checkpoint."
+            if args.controller == "forecast-pressure"
+            else "ST-GNN forecasts are not used by this controller."
+        ),
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
@@ -212,6 +241,8 @@ def main():
     print(json.dumps(metrics, indent=2))
     print(f"\nArtifacts saved to: {run_dir}")
     print("Note: an SMDP learner is initialized per run; this script does not train across separate episodes.")
+    if args.emergency_priority:
+        print(f"Emergency-priority events: {len(controller.emergency.events)}")
 
 
 if __name__ == "__main__":

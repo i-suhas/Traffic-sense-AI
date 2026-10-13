@@ -8,12 +8,14 @@
 ## 2. Define hypotheses before experiments
 - H1: density-responsive control improves at least one delay/queue metric over fixed-time under some demand regimes.
 - H2: variable-duration SMDP improves average travel-time loss versus the density heuristic across held-out seeds.
-- H3: ST-GNN+SMDP improves over SMDP without forecasting when congestion propagates across connected intersections.
+- H3: ST-GNN-based forecasting improves queue prediction over persistence and moving-average baselines on held-out scenarios.
+- H4: emergency priority reduces emergency-vehicle travel time without unacceptable increases in ordinary-vehicle delay.
+- H5: forecast-informed pressure control improves a pre-registered traffic objective over pressure control alone.
 
 Treat each as a hypothesis, not a promised result. A null or mixed result can still make a useful paper if methods and analysis are sound.
 
 ## 3. Build an experiment matrix
-- Controllers: fixed-time, density-responsive, SMDP; later neighbor-aware SMDP and ST-GNN+SMDP.
+- Controllers: fixed-time, density-responsive, SMDP, pressure-informed control; emergency-priority ablation; forecast-pressure only after the ST-GNN beats simple forecasting baselines.
 - Demand: low/medium/high demand, directional rush-hour imbalance, short congestion surge, incident/blocked edge if implemented.
 - Seeds: at least 10 matched random seeds for an initial study; more if power/variance requires it.
 - Replications: identical network, route seed, simulation horizon, vehicle types, and demand profile across controllers.

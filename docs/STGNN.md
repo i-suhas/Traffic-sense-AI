@@ -1,24 +1,25 @@
-# ST-GNN component: data contract and next integration step
+# ST-GNN queue forecasting
 
-## Model currently supplied
-`SpatialTemporalNet` uses normalized one-hop graph aggregation, then a GRU over each node's historical queue-pressure series. It is a compact graph-temporal predictor suitable as a starting baseline, not a reproduction of every STGCN variant.
+The project contains an experimental graph-aggregation + GRU model. It predicts the next queue count per signalized intersection from recent `halting`, `vehicles`, `waiting`, and `mean_speed` features.
 
-## Data contract
-- `X`: `[samples, history_steps, intersections, features]`
-- `y`: `[samples, intersections, 1]`, queue pressure at a future horizon
-- `A`: `[intersections, intersections]`, adjacency aligned with `node_ids`
-- `node_ids`: sorted TLS IDs used in each state log
+## Dataset
 
-The example adjacency file is illustrative only. Build a real adjacency matrix from network connectivity: two signalized intersections should be adjacent if a directed road/path connects them within the chosen neighborhood rule. Do not use the four-node example for Mysuru.
+Use `scripts/export_graph_dataset.py` to create windows from a `states.csv` run. Prefer `--network data/demo/demo.net.xml` so the TLS adjacency is derived from connected network edges. A supplied `--adjacency` CSV is supported only if its rows/columns match sorted TLS IDs exactly.
 
-## Evaluation
-Use chronological or scenario-level train/validation/test splits. Prefer holding out whole demand seeds and/or parts of the network to test generalization. Report MAE/RMSE against persistence and simple moving-average predictors. Normalize inputs using training data only. Include a leakage audit: no future features may enter a window.
+Each sample has:
+- `X`: `[window, nodes, features]`
+- `y`: `[nodes, 1]`, halting count at the configured forecast horizon
+- `A`: adjacency matrix
+- `target_times`: target simulation times for chronological ordering
 
-## Integrating forecasts into control
-Only after validation, load the checkpoint in the controller and append forecast queue pressure for the current and upstream intersections to the SMDP state. Compare:
-1. local density controller;
-2. local SMDP;
-3. SMDP with neighbor state but no learned predictor;
-4. ST-GNN forecast + SMDP.
+## Training protocol
 
-This integration is intentionally separated so an untrained/random neural network never silently controls signals.
+`scripts/train_stgnn.py` splits samples chronologically into train, validation, and test partitions. Feature normalization parameters are learned from training inputs only. It reports MAE and RMSE for the model, persistence, and moving-average baselines on validation and test windows, and saves the trained checkpoint plus a `.metrics.json` report.
+
+Sliding windows overlap in their historical inputs by design. Targets are chronological and validation/test targets are not used for gradient updates. For stronger generalization evidence, evaluate the trained checkpoint on a different traffic seed or network, and report that result separately.
+
+## Control integration
+
+`--controller forecast-pressure --forecast-model models/stgnn.pt` loads the checkpoint and uses predicted intersection queue values to adjust the duration of a pressure-selected green phase. It does not replace the emergency manager, guarantee an optimal phase choice, or make the signal program safe by itself. The SUMO phase program remains responsible for the configured transition sequence.
+
+Do not claim the ST-GNN improves control unless its test forecast error beats simple baselines and matched-seed traffic experiments show a benefit.
