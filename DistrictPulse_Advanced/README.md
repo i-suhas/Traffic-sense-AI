@@ -1,0 +1,243 @@
+# DistrictPulse AI 2.0
+
+**Emergency-aware, pressure-informed traffic signal control with an optional spatio-temporal graph neural network (ST-GNN) queue forecaster.**
+
+DistrictPulse AI is a reproducible SUMO/TraCI simulation project. It compares fixed-time, density-responsive, tabular SMDP Q-learning, pressure-informed control, and (after a trained checkpoint exists) forecast-aware pressure control. A generated demo includes a reproducible ambulance route so ordinary traffic performance and emergency priority can be evaluated separately.
+
+> Research honesty: this repository provides an experimental simulation pipeline, not proof that any controller is universally better. The pressure controller respects the existing SUMO phase sequence and uses pressure to decide when to extend or shorten green time; it does not jump directly to arbitrary phases. The ST-GNN must beat simple forecasting baselines on held-out data before its predictions should be trusted.
+
+## 1. What the project addresses
+
+Fixed-time signals do not react to changing queues. Density-only control reacts to upstream queue size but can ignore whether downstream lanes are blocked. DistrictPulse adds:
+- **Emergency priority:** identify an approaching ambulance from its SUMO type/ID and upcoming TLS route; request priority for its compatible movement; let the programmed signal sequence handle yellow/clearance transitions; extend the compatible green and log the event.
+- **Pressure-informed control:** score programmed green phases using upstream halting vehicles minus downstream occupancy.
+- **ST-GNN queue forecasting:** predict the next queue value for each signalized intersection from recent queue, vehicle-count, waiting-time and speed history.
+- **Forecast-pressure experiment:** use validated queue forecasts to adjust the duration of a pressure-selected green phase.
+- **Evaluation:** compare trip duration, waiting time, time loss, queue proxies, emergency trip metrics, and forecast MAE/RMSE.
+
+## 2. Architecture
+
+```text
+SUMO network + synthetic traffic + ambulance route
+                     |
+                    TraCI
+                     |
+      traffic state + next emergency TLS
+                     |
+        +------------+-------------+
+        |                          |
+   ST-GNN forecast          Emergency manager
+        |                          |
+        +------------+-------------+
+                     |
+     fixed / density / SMDP / pressure
+                     |
+      existing SUMO TLS phase program
+      (yellow/clearance remains in control)
+                     |
+      tripinfo + state/event/forecast logs
+```
+
+## 3. Windows installation
+
+Open VS Code in this project folder and use **PowerShell**. Adjust the SUMO installation path if yours is different.
+
+```powershell
+$env:SUMO_HOME = "C:\Program Files (x86)\Eclipse\Sumo"
+$env:Path += ";$env:SUMO_HOME\bin"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+sumo --version
+netgenerate --help
+python -c "import sys; print(sys.executable)"
+```
+
+If PowerShell blocks environment activation, run this for the current terminal only, then activate again:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+If SUMO is installed elsewhere, find the folder containing `bin\sumo.exe` and set `SUMO_HOME` to the SUMO installation root. The folder should also contain `tools\randomTrips.py`.
+
+## 4. Run the demo one step at a time
+
+Do not skip ahead on the first run. Wait for each command to finish and inspect its output.
+
+### Step 1: Generate the demo network, traffic and ambulance
+
+```powershell
+python scripts\setup_demo.py --seed 42 --end 1800
+```
+
+Expected files:
+- `data\demo\demo.net.xml`
+- `data\demo\demo.rou.xml`
+- `data\demo\demo.sumocfg`
+
+The route file should include `ambulance_seed42` with type `emergency`. If generation fails while finding a resolved vehicle route, inspect the SUMO/randomTrips output before continuing.
+
+### Step 2: Run tests
+
+```powershell
+python -m pytest tests -q
+```
+
+### Step 3: Run the fixed-time baseline
+
+```powershell
+python scripts\run_experiment.py --scenario data\demo --controller fixed --seed 42 --results-dir results\upgrade
+```
+
+### Step 4: Run the density baseline
+
+```powershell
+python scripts\run_experiment.py --scenario data\demo --controller density --seed 42 --results-dir results\upgrade
+```
+
+### Step 5: Run SMDP Q-learning
+
+```powershell
+python scripts\run_experiment.py --scenario data\demo --controller smdp --seed 42 --results-dir results\upgrade
+```
+
+The tabular learner is initialized anew for each run. This version does not persist learning across separate experiments.
+
+### Step 6: Run pressure-informed control
+
+```powershell
+python scripts\run_experiment.py --scenario data\demo --controller max-pressure --seed 42 --results-dir results\upgrade
+```
+
+The controller scores green phases from controlled movements' upstream queue and downstream occupancy. It works within the current SUMO program's phase order. This is pressure-informed control, not a custom signal-program optimizer.
+
+### Step 7: Enable ambulance priority
+
+Run the same controller with the priority layer enabled:
+
+```powershell
+python scripts\run_experiment.py --scenario data\demo --controller max-pressure --seed 42 --emergency-priority --results-dir results\upgrade_priority
+```
+
+You can also test priority with the other controllers:
+
+```powershell
+python scripts\run_experiment.py --scenario data\demo --controller density --seed 42 --emergency-priority --results-dir results\upgrade_priority
+python scripts\run_experiment.py --scenario data\demo --controller smdp --seed 42 --emergency-priority --results-dir results\upgrade_priority
+```
+
+Inspect `emergency_events.csv` and `metrics.json` in each run folder. A request may be logged without a grant if no compatible green phase can be identified or the ambulance never reaches a signal within the configured lookahead.
+
+### Step 8: Compare multiple seeds
+
+Use a new results directory for each experiment batch to avoid colliding with old output folders.
+
+```powershell
+python scripts\run_batch.py --scenario data\demo --controllers fixed density smdp max-pressure --seeds 11 22 33 44 55 --results-dir results\batch_baseline
+python scripts\run_batch.py --scenario data\demo --controllers fixed density smdp max-pressure --seeds 11 22 33 44 55 --emergency-priority --results-dir results\batch_priority
+```
+
+Summarize the two batches separately:
+
+```powershell
+python scripts\summarize_results.py --results results\batch_baseline --out results\batch_baseline_comparison.csv
+python scripts\plot_results.py --csv results\batch_baseline_comparison.csv --out results\batch_baseline.png
+python scripts\summarize_results.py --results results\batch_priority --out results\batch_priority_comparison.csv
+python scripts\plot_results.py --csv results\batch_priority_comparison.csv --out results\batch_priority.png
+```
+
+Metrics are not evidence of superiority unless demand conditions are matched and multiple seeds are compared. Compare emergency travel time and waiting separately from ordinary vehicles.
+
+## 5. Train the ST-GNN forecaster
+
+Train on state logs generated by a simulation using the same network/TLS IDs as the future forecast-pressure run.
+
+### Step 1: Export graph-temporal windows
+
+Use the generated network to derive a TLS adjacency matrix automatically:
+
+```powershell
+python scripts\export_graph_dataset.py --states results\upgrade\max-pressure_seed42\states.csv --network data\demo\demo.net.xml --window 12 --horizon 3 --out data\graph_dataset.npz
+```
+
+`window 12` means 12 recorded simulation steps as input. `horizon 3` predicts the queue at the third recorded step after the input window. The exporter uses four features per TLS: halting count, vehicle count, waiting time and mean speed.
+
+If you prefer a supplied adjacency matrix, replace `--network data\demo\demo.net.xml` with `--adjacency configs\adjacency_example.csv`. The CSV must have one row and column for every sorted TLS ID in the state log.
+
+### Step 2: Train and evaluate
+
+```powershell
+python scripts\train_stgnn.py --dataset data\graph_dataset.npz --epochs 80 --patience 12 --out models\stgnn.pt
+```
+
+This creates:
+- `models\stgnn.pt`
+- `models\stgnn.metrics.json`
+
+The metrics report contains chronological train/validation/test sizes, MAE and RMSE for the ST-GNN, a persistence baseline and a moving-average baseline. Do not assume the neural model is useful just because training completes. If its held-out test scores do not beat simple baselines, do not use its predictions for decision-making.
+
+### Step 3: Run forecast-aware pressure control
+
+Only after training completes successfully:
+
+```powershell
+python scripts\run_experiment.py --scenario data\demo --controller forecast-pressure --forecast-model models\stgnn.pt --seed 42 --results-dir results\forecast
+```
+
+Enable emergency priority separately:
+
+```powershell
+python scripts\run_experiment.py --scenario data\demo --controller forecast-pressure --forecast-model models\stgnn.pt --seed 42 --emergency-priority --results-dir results\forecast_priority
+```
+
+The forecast-aware controller uses the predicted intersection queue to adjust the duration of a pressure-selected green. It is a first integration experiment, not proof of a globally optimal control policy. The checkpoint's TLS IDs must match the running network.
+
+## 6. Important outputs
+
+Each run directory contains:
+- `states.csv`: one traffic-state row per simulation step and TLS.
+- `tripinfo.xml`: SUMO trip-level metrics.
+- `metrics.json`: ordinary and emergency trip metrics plus queue proxies.
+- `manifest.json`: controller, seed, command and configuration notes.
+- `emergency_events.csv`: priority requests, green grants and transition events.
+- `smdp_transitions.csv`: SMDP state/action/reward records.
+- `pressure_scores.csv`: pressure scores where applicable.
+- `forecast_predictions.csv`: predictions and observed queue values for forecast-pressure runs.
+
+Generated network files, models, and experiment outputs are local artifacts and should generally not be committed to GitHub unless intentionally publishing a small reproducible sample.
+
+## 7. Tests and troubleshooting
+
+```powershell
+python -m pytest tests -q
+python -m compileall districtpulse scripts
+```
+
+Common issues:
+- **`sumo` not recognized:** correct `SUMO_HOME` and add `$env:SUMO_HOME\bin` to this PowerShell session.
+- **TraCI import error:** make sure `SUMO_HOME\tools` is available; `run_experiment.py` adds it when `SUMO_HOME` is set.
+- **Output folder already exists:** select a new `--results-dir`; add `--overwrite` only when intentionally replacing that exact controller/seed folder.
+- **No emergency events:** confirm `data\demo\demo.rou.xml` contains `ambulance_seed42`, that the route passes a traffic light, and that `--emergency-priority` was supplied.
+- **ST-GNN split too small:** use a longer simulation or a smaller window/horizon. The exporter needs enough recorded timestamps to produce multiple chronological samples.
+- **Forecast checkpoint node mismatch:** export/train on the same network/TLS topology used by the forecast-pressure run.
+
+## 8. Scope and limitations
+
+- RandomTrips demand is synthetic, not measured city traffic.
+- The emergency layer is a simulation prototype; validate signal transitions and route behavior in SUMO-GUI before making real-world safety claims.
+- The pressure controller respects the existing phase program and cannot reorder arbitrary signal phases.
+- The ST-GNN predicts intersection-level queue counts, not individual vehicle trajectories.
+- Forecast-pressure uses the prediction to adjust green duration; it is not end-to-end reinforcement learning.
+- SMDP learning is reset for each run and its current tabular state is coarse.
+- A SUMO experiment is not a real-world deployment or proof of improved emergency response.
+
+## 9. Suggested next research steps
+
+1. Validate emergency grants and yellow/clearance behavior in SUMO-GUI.
+2. Compare emergency travel time and ordinary-traffic delay over matched seeds.
+3. Establish whether Max-Pressure improves over density-based control.
+4. Verify that ST-GNN beats persistence and moving-average baselines on a genuinely held-out scenario/seed.
+5. Improve movement-level forecasts and phase-selection constraints before claiming a novel control algorithm.

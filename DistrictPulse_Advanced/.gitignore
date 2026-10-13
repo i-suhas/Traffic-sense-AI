@@ -1,0 +1,31 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editors / secrets
+.vscode/
+.env
+.env.*
+
+# Generated SUMO scenarios (recreate with scripts/setup_demo.py)
+data/demo/*.net.xml
+data/demo/*.rou.xml
+data/demo/*.sumocfg
+data/graph_dataset.npz
+data/*.net.xml
+data/*.rou.xml
+data/*.sumocfg
+data/*.trips.xml
+
+# Experiment outputs and trained artifacts
+results/
+models/*.pt
+models/*.pth
+models/*.metrics.json
+
+# OS files
+.DS_Store
+Thumbs.db
